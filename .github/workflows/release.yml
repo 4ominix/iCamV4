@@ -1,0 +1,44 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: macos-13
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Theos
+        run: |
+          brew install ldid make
+          export THEOS=$HOME/theos
+          git clone --recursive https://github.com/theos/theos.git $THEOS
+          echo "THEOS=$THEOS" >> $GITHUB_ENV
+
+      - name: Fetch iOS SDK
+        run: |
+          SDK_URL="https://github.com/theos/sdks/archive/master.tar.gz"
+          mkdir -p $THEOS/sdks
+          curl -sL "$SDK_URL" | tar xz -C $THEOS/sdks --strip-components=1
+
+      - name: Build package
+        run: |
+          export PATH="$THEOS/bin:$(brew --prefix make)/libexec/gnubin:$PATH"
+          make package FINALPACKAGE=1 2>&1
+        env:
+          THEOS: ${{ env.THEOS }}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: packages/*.deb
+          generate_release_notes: true
+          draft: false
+          prerelease: false
