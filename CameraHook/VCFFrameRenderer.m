@@ -3,24 +3,20 @@
 #import <CoreImage/CoreImage.h>
 #import <ImageIO/ImageIO.h>
 
-static NSString *const kSharedDir = @"/var/jb/var/mobile/Library/VCamFree";
 static NSString *const kStreamDir = @"/var/jb/var/mobile/Library/VCamFree/Streams";
 
 @implementation VCFFrameRenderer {
     dispatch_queue_t _renderQueue;
     VTPixelTransferSessionRef _transferSession;
 
-    // image source
     CVPixelBufferRef _staticBuffer;
 
-    // video source
     AVAssetReader *_assetReader;
     AVAssetReaderTrackOutput *_trackOutput;
     Float64 _videoFPS;
     uint64_t _videoFrameIndex;
     NSString *_videoPath;
 
-    // stream source (FLV from RTMP daemon)
     NSString *_streamDirectory;
     dispatch_source_t _streamPollTimer;
     VTDecompressionSessionRef _decompSession;
@@ -28,6 +24,9 @@ static NSString *const kStreamDir = @"/var/jb/var/mobile/Library/VCamFree/Stream
     CVPixelBufferRef _decompOutBuffer;
 
     CVPixelBufferRef _latestRendered;
+
+    CIContext *_ciContext;
+    CIFilter *_colorFilter;
 }
 
 + (instancetype)shared {
@@ -42,7 +41,12 @@ static NSString *const kStreamDir = @"/var/jb/var/mobile/Library/VCamFree/Stream
     if (self) {
         _renderQueue = dispatch_queue_create("com.vcamfree.render", DISPATCH_QUEUE_SERIAL);
         _sourceType = VCFSourceTypeNone;
+        _contrast = 1.0f;
+        _saturation = 1.0f;
+        _zoom = 1.0f;
         VTPixelTransferSessionCreate(kCFAllocatorDefault, &_transferSession);
+        _ciContext = [CIContext contextWithOptions:@{kCIContextUseSoftwareRenderer: @NO}];
+        _colorFilter = [CIFilter filterWithName:@"CIColorControls"];
     }
     return self;
 }
@@ -135,7 +139,7 @@ static NSString *const kStreamDir = @"/var/jb/var/mobile/Library/VCamFree/Stream
 
 - (CVPixelBufferRef)_nextVideoFrame {
     if (!_assetReader || _assetReader.status != AVAssetReaderStatusReading) {
-        [self _resetVideoReader]; // loop
+        [self _resetVideoReader];
         if (!_assetReader) return NULL;
     }
     CMSampleBufferRef sb = [_trackOutput copyNextSampleBuffer];
@@ -191,7 +195,6 @@ static NSString *const kStreamDir = @"/var/jb/var/mobile/Library/VCamFree/Stream
     unsigned long long fileSize = fh.offsetInFile;
     if (fileSize < 13) { [fh closeFile]; return nil; }
 
-    // read last 4 bytes = previous tag size, then read that tag
     [fh seekToFileOffset:fileSize - 4];
     NSData *prevSizeData = [fh readDataOfLength:4];
     if (prevSizeData.length < 4) { [fh closeFile]; return nil; }
@@ -209,24 +212,21 @@ static NSString *const kStreamDir = @"/var/jb/var/mobile/Library/VCamFree/Stream
     if (tagData.length < 12) return nil;
     const uint8_t *tag = tagData.bytes;
 
-    // FLV tag: type(1) + dataSize(3) + timestamp(3) + timestampExt(1) + streamId(3) + data
     uint8_t tagType = tag[0];
-    if (tagType != 0x09) return nil; // not video
+    if (tagType != 0x09) return nil;
 
     uint32_t dataSize = ((uint32_t)tag[1] << 16) | ((uint32_t)tag[2] << 8) | tag[3];
     if (11 + dataSize > tagData.length) return nil;
 
     const uint8_t *videoData = tag + 11;
-    // AVC: frameType(4bits) + codecId(4bits) + AVCPacketType(1) + compositionTime(3)
     if (dataSize < 5) return nil;
     uint8_t codecId = videoData[0] & 0x0F;
-    if (codecId != 7) return nil; // not AVC/H.264
+    if (codecId != 7) return nil;
     uint8_t pktType = videoData[1];
     if (pktType == 0) {
-        // SPS/PPS sequence header — store for decoder init
         return [NSData dataWithBytes:videoData length:dataSize];
     }
-    if (pktType != 1) return nil; // not NALU
+    if (pktType != 1) return nil;
     return [NSData dataWithBytes:videoData + 5 length:dataSize - 5];
 }
 
@@ -235,7 +235,6 @@ static NSString *const kStreamDir = @"/var/jb/var/mobile/Library/VCamFree/Stream
     NSUInteger len = nalData.length;
     if (len < 5) return;
 
-    // check if this is SPS/PPS (sequence header)
     uint8_t pktType = bytes[1];
     if (pktType == 0 && len > 10) {
         [self _initDecoderWithAVCConfig:nalData];
@@ -244,7 +243,6 @@ static NSString *const kStreamDir = @"/var/jb/var/mobile/Library/VCamFree/Stream
 
     if (!_decompSession || !_decompFmt) return;
 
-    // AVCC format: length-prefixed NALUs
     CMBlockBufferRef blockBuf = NULL;
     CMBlockBufferCreateWithMemoryBlock(kCFAllocatorDefault,
         (void *)(bytes), len, kCFAllocatorNull, NULL, 0, len, 0, &blockBuf);
@@ -275,25 +273,21 @@ static NSString *const kStreamDir = @"/var/jb/var/mobile/Library/VCamFree/Stream
 
     const uint8_t *p = configData.bytes;
     NSUInteger total = configData.length;
-    // skip FLV AVC header: frameType+codecId(1) + pktType(1) + compositionTime(3)
     if (total < 16) return;
     p += 5; total -= 5;
 
-    // AVCDecoderConfigurationRecord
     if (total < 7) return;
     uint8_t numSPS = p[5] & 0x1F;
     const uint8_t *cursor = p + 6;
     const uint8_t *end = p + total;
 
     NSMutableArray *paramSets = [NSMutableArray array];
-    NSMutableArray *paramSizes = [NSMutableArray array];
 
     for (int i = 0; i < numSPS && cursor + 2 <= end; i++) {
         uint16_t spsLen = ((uint16_t)cursor[0] << 8) | cursor[1];
         cursor += 2;
         if (cursor + spsLen > end) return;
         [paramSets addObject:[NSData dataWithBytes:cursor length:spsLen]];
-        [paramSizes addObject:@(spsLen)];
         cursor += spsLen;
     }
 
@@ -306,7 +300,6 @@ static NSString *const kStreamDir = @"/var/jb/var/mobile/Library/VCamFree/Stream
         cursor += 2;
         if (cursor + ppsLen > end) return;
         [paramSets addObject:[NSData dataWithBytes:cursor length:ppsLen]];
-        [paramSizes addObject:@(ppsLen)];
         cursor += ppsLen;
     }
 
@@ -376,6 +369,63 @@ static void vcf_decomp_callback(void *refCon, void *srcRefCon, OSStatus status,
     if (_latestRendered) { CVPixelBufferRelease(_latestRendered); _latestRendered = NULL; }
 }
 
+#pragma mark - Color & Position Transforms
+
+- (CVPixelBufferRef)_applyTransforms:(CVPixelBufferRef)source {
+    BOOL needColor = (_brightness != 0 || _contrast != 1.0f || _saturation != 1.0f);
+    BOOL needPosition = (_offsetX != 0 || _offsetY != 0 || _zoom != 1.0f);
+    if (!needColor && !needPosition) {
+        CVPixelBufferRetain(source);
+        return source;
+    }
+
+    CIImage *ciImage = [CIImage imageWithCVPixelBuffer:source];
+    if (!ciImage) {
+        CVPixelBufferRetain(source);
+        return source;
+    }
+
+    size_t w = CVPixelBufferGetWidth(source);
+    size_t h = CVPixelBufferGetHeight(source);
+
+    if (needPosition) {
+        float scale = MAX(0.1f, _zoom);
+        CGAffineTransform t = CGAffineTransformIdentity;
+        t = CGAffineTransformTranslate(t, w * 0.5f, h * 0.5f);
+        t = CGAffineTransformScale(t, scale, scale);
+        t = CGAffineTransformTranslate(t, -w * 0.5f + _offsetX * w, -h * 0.5f - _offsetY * h);
+        ciImage = [ciImage imageByApplyingTransform:t];
+    }
+
+    if (needColor) {
+        [_colorFilter setValue:ciImage forKey:kCIInputImageKey];
+        [_colorFilter setValue:@(_brightness) forKey:@"inputBrightness"];
+        [_colorFilter setValue:@(_contrast) forKey:@"inputContrast"];
+        [_colorFilter setValue:@(_saturation) forKey:@"inputSaturation"];
+        CIImage *out = _colorFilter.outputImage;
+        if (out) ciImage = out;
+    }
+
+    ciImage = [ciImage imageByCroppingToRect:CGRectMake(0, 0, w, h)];
+
+    NSDictionary *attrs = @{
+        (id)kCVPixelBufferWidthKey: @(w),
+        (id)kCVPixelBufferHeightKey: @(h),
+        (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA),
+        (id)kCVPixelBufferIOSurfacePropertiesKey: @{}
+    };
+    CVPixelBufferRef outPB = NULL;
+    CVPixelBufferCreate(kCFAllocatorDefault, w, h, kCVPixelFormatType_32BGRA,
+                        (__bridge CFDictionaryRef)attrs, &outPB);
+    if (!outPB) {
+        CVPixelBufferRetain(source);
+        return source;
+    }
+
+    [_ciContext render:ciImage toCVPixelBuffer:outPB];
+    return outPB;
+}
+
 #pragma mark - Render
 
 - (CVPixelBufferRef)renderFrameMatchingFormat:(CMFormatDescriptionRef)fmt
@@ -390,20 +440,22 @@ static void vcf_decomp_callback(void *refCon, void *srcRefCon, OSStatus status,
                 srcPB = _staticBuffer;
                 if (srcPB) CVPixelBufferRetain(srcPB);
                 break;
-
             case VCFSourceTypeVideo:
                 srcPB = [self _nextVideoFrame];
                 break;
-
             case VCFSourceTypeStream:
                 srcPB = _decompOutBuffer;
                 if (srcPB) CVPixelBufferRetain(srcPB);
                 break;
-
             default:
                 break;
         }
 
+        if (!srcPB) return;
+
+        CVPixelBufferRef transformed = [self _applyTransforms:srcPB];
+        CVPixelBufferRelease(srcPB);
+        srcPB = transformed;
         if (!srcPB) return;
 
         CMVideoDimensions targetDim = CMVideoFormatDescriptionGetDimensions(fmt);
@@ -414,11 +466,10 @@ static void vcf_decomp_callback(void *refCon, void *srcRefCon, OSStatus status,
         OSType srcFmt = CVPixelBufferGetPixelFormatType(srcPB);
 
         if ((int)srcW == targetDim.width && (int)srcH == targetDim.height && srcFmt == targetFmt) {
-            result = srcPB; // direct use, already retained
+            result = srcPB;
             return;
         }
 
-        // need pixel transfer (scale + format convert)
         NSDictionary *attrs = @{
             (id)kCVPixelBufferWidthKey: @(targetDim.width),
             (id)kCVPixelBufferHeightKey: @(targetDim.height),

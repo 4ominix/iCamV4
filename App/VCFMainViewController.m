@@ -49,6 +49,18 @@ typedef NS_ENUM(NSInteger, VCFSourceMode) {
 @property (nonatomic, assign) int           serverPort;
 @property (nonatomic, assign) int           serverClients;
 @property (nonatomic, assign) BOOL          hasShownRespringHint;
+
+@property (nonatomic, strong) UISlider *sliderOffsetX;
+@property (nonatomic, strong) UISlider *sliderOffsetY;
+@property (nonatomic, strong) UISlider *sliderZoom;
+@property (nonatomic, strong) UISlider *sliderBrightness;
+@property (nonatomic, strong) UISlider *sliderSaturation;
+
+@property (nonatomic, assign) float cfgOffsetX;
+@property (nonatomic, assign) float cfgOffsetY;
+@property (nonatomic, assign) float cfgZoom;
+@property (nonatomic, assign) float cfgBrightness;
+@property (nonatomic, assign) float cfgSaturation;
 @end
 
 @implementation VCFMainViewController
@@ -143,6 +155,12 @@ typedef NS_ENUM(NSInteger, VCFSourceMode) {
     else {
         self.sourceMode = VCFSourceModeImage;
     }
+
+    self.cfgOffsetX    = [cfg[@"offset_x"] floatValue];
+    self.cfgOffsetY    = [cfg[@"offset_y"] floatValue];
+    self.cfgZoom       = [cfg[@"scale"] floatValue] ?: 1.0f;
+    self.cfgBrightness = [cfg[@"color_brightness"] floatValue];
+    self.cfgSaturation = [cfg[@"color_saturation"] floatValue] ?: 1.0f;
 }
 
 - (void)_saveConfig {
@@ -157,7 +175,12 @@ typedef NS_ENUM(NSInteger, VCFSourceMode) {
     NSDictionary *cfg = @{
         @"enabled": @(self.cameraEnabled),
         @"source_type": srcStr,
-        @"media_path": self.selectedMedia ?: @""
+        @"media_path": self.selectedMedia ?: @"",
+        @"offset_x": @(self.cfgOffsetX),
+        @"offset_y": @(self.cfgOffsetY),
+        @"scale": @(self.cfgZoom),
+        @"color_brightness": @(self.cfgBrightness),
+        @"color_saturation": @(self.cfgSaturation)
     };
 
     [self _ensureDirectories];
@@ -175,16 +198,17 @@ typedef NS_ENUM(NSInteger, VCFSourceMode) {
 
 #pragma mark - TableView
 
-// sections: 0=master switch, 1=source mode, 2=media library, 3=OBS/RTMP, 4=actions
-- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { return 5; }
+// sections: 0=master switch, 1=source mode, 2=media library, 3=position/color, 4=OBS/RTMP, 5=actions
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { return 6; }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     switch (section) {
-        case 0: return 1; // master switch
-        case 1: return 3; // source modes: image, video, stream
-        case 2: return [VCFMediaStore shared].items.count + 1; // media + import button
-        case 3: return 2; // RTMP status + OBS URL
-        case 4: return 1; // clear streams
+        case 0: return 1;
+        case 1: return 3;
+        case 2: return [VCFMediaStore shared].items.count + 1;
+        case 3: return 6; // offsetX, offsetY, zoom, brightness, saturation, reset
+        case 4: return 2;
+        case 5: return 1;
     }
     return 0;
 }
@@ -194,8 +218,9 @@ typedef NS_ENUM(NSInteger, VCFSourceMode) {
         case 0: return @"Virtual Camera";
         case 1: return @"Source Mode";
         case 2: return @"Media Library";
-        case 3: return @"OBS / RTMP Stream";
-        case 4: return @"Maintenance";
+        case 3: return @"Position & Color";
+        case 4: return @"OBS / RTMP Stream";
+        case 5: return @"Maintenance";
     }
     return nil;
 }
@@ -273,6 +298,43 @@ typedef NS_ENUM(NSInteger, VCFSourceMode) {
             break;
         }
         case 3: {
+            cell.selectionStyle = UITableViewCellSelectionStyleNone;
+            if (indexPath.row < 5) {
+                NSArray *labels = @[@"X Offset", @"Y Offset", @"Zoom", @"Brightness", @"Saturation"];
+                NSArray *icons  = @[@"arrow.left.and.right", @"arrow.up.and.down",
+                                    @"magnifyingglass", @"sun.max", @"paintpalette"];
+                cell.textLabel.text = labels[indexPath.row];
+                cell.imageView.image = [UIImage systemImageNamed:icons[indexPath.row]];
+                cell.imageView.tintColor = [UIColor systemIndigoColor];
+
+                UISlider *slider = [[UISlider alloc] initWithFrame:CGRectMake(0, 0, 160, 30)];
+                slider.tag = 500 + indexPath.row;
+                [slider addTarget:self action:@selector(_adjustSliderChanged:)
+                         forControlEvents:UIControlEventValueChanged];
+
+                switch (indexPath.row) {
+                    case 0: slider.minimumValue = -0.5f; slider.maximumValue = 0.5f;
+                            slider.value = self.cfgOffsetX; self.sliderOffsetX = slider; break;
+                    case 1: slider.minimumValue = -0.5f; slider.maximumValue = 0.5f;
+                            slider.value = self.cfgOffsetY; self.sliderOffsetY = slider; break;
+                    case 2: slider.minimumValue = 0.5f; slider.maximumValue = 3.0f;
+                            slider.value = self.cfgZoom; self.sliderZoom = slider; break;
+                    case 3: slider.minimumValue = -0.5f; slider.maximumValue = 0.5f;
+                            slider.value = self.cfgBrightness; self.sliderBrightness = slider; break;
+                    case 4: slider.minimumValue = 0.0f; slider.maximumValue = 2.0f;
+                            slider.value = self.cfgSaturation; self.sliderSaturation = slider; break;
+                }
+                cell.accessoryView = slider;
+            } else {
+                cell.textLabel.text = @"Reset All";
+                cell.textLabel.textColor = [UIColor systemOrangeColor];
+                cell.imageView.image = [UIImage systemImageNamed:@"arrow.counterclockwise"];
+                cell.imageView.tintColor = [UIColor systemOrangeColor];
+                cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+            }
+            break;
+        }
+        case 4: {
             if (indexPath.row == 0) {
                 cell.textLabel.text = @"RTMP Server";
                 cell.detailTextLabel.text = [NSString stringWithFormat:@"%@ — port %d, %d client%s",
@@ -296,7 +358,7 @@ typedef NS_ENUM(NSInteger, VCFSourceMode) {
             }
             break;
         }
-        case 4: {
+        case 5: {
             cell.textLabel.text = @"Clear Stream Cache";
             cell.textLabel.textColor = [UIColor systemRedColor];
             cell.imageView.image = [UIImage systemImageNamed:@"trash"];
@@ -333,6 +395,19 @@ typedef NS_ENUM(NSInteger, VCFSourceMode) {
             break;
         }
         case 3: {
+            if (indexPath.row == 5) {
+                self.cfgOffsetX = 0; self.cfgOffsetY = 0; self.cfgZoom = 1.0f;
+                self.cfgBrightness = 0; self.cfgSaturation = 1.0f;
+                if (self.sliderOffsetX)    self.sliderOffsetX.value = 0;
+                if (self.sliderOffsetY)    self.sliderOffsetY.value = 0;
+                if (self.sliderZoom)       self.sliderZoom.value = 1.0f;
+                if (self.sliderBrightness) self.sliderBrightness.value = 0;
+                if (self.sliderSaturation) self.sliderSaturation.value = 1.0f;
+                [self _saveConfig];
+            }
+            break;
+        }
+        case 4: {
             if (indexPath.row == 1) {
                 NSString *localIP = [self _localIPAddress];
                 NSString *obsURL = [NSString stringWithFormat:@"rtmp://%@:%d/live",
@@ -349,7 +424,7 @@ typedef NS_ENUM(NSInteger, VCFSourceMode) {
             }
             break;
         }
-        case 4: {
+        case 5: {
             [self _clearStreamCache];
             break;
         }
@@ -417,6 +492,17 @@ typedef NS_ENUM(NSInteger, VCFSourceMode) {
     [alert addAction:[UIAlertAction actionWithTitle:@"Later"
         style:UIAlertActionStyleCancel handler:nil]];
     [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)_adjustSliderChanged:(UISlider *)slider {
+    switch (slider.tag) {
+        case 500: self.cfgOffsetX    = slider.value; break;
+        case 501: self.cfgOffsetY    = slider.value; break;
+        case 502: self.cfgZoom       = slider.value; break;
+        case 503: self.cfgBrightness = slider.value; break;
+        case 504: self.cfgSaturation = slider.value; break;
+    }
+    [self _saveConfig];
 }
 
 - (void)_showImportPicker {
