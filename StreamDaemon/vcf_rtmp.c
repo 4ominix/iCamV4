@@ -135,7 +135,7 @@ static uint16_t read_u16be(const uint8_t **p) {
     return v;
 }
 
-static uint32_t read_u32be(const uint8_t **p) {
+static uint32_t __attribute__((unused)) read_u32be(const uint8_t **p) {
     uint32_t v = ((uint32_t)(*p)[0] << 24) | ((uint32_t)(*p)[1] << 16) |
                  ((uint32_t)(*p)[2] << 8) | (*p)[3];
     *p += 4;
