@@ -5,13 +5,16 @@
 #import <notify.h>
 #import <ifaddrs.h>
 #import <arpa/inet.h>
+#import <spawn.h>
 #import "VCFMediaStore.h"
 
 // ── paths & notifications ───────────────────────
+static NSString *const kSharedDir   = @"/var/jb/var/mobile/Library/VCamFree";
 static NSString *const kConfigPath  = @"/var/jb/var/mobile/Library/VCamFree/CameraConfig.plist";
 static NSString *const kStatusPath  = @"/var/jb/var/mobile/Library/VCamFree/CameraStatus.plist";
 static NSString *const kServerPath  = @"/var/jb/var/mobile/Library/VCamFree/ServerStatus.plist";
 static NSString *const kStreamDir   = @"/var/jb/var/mobile/Library/VCamFree/Streams";
+static NSString *const kMediaDir    = @"/var/jb/var/mobile/Library/VCamFree/Media";
 
 static NSString *const kNotifConfigChanged = @"com.vcamfree.camera.config.changed";
 static NSString *const kNotifStatusChanged = @"com.vcamfree.camera.status.changed";
@@ -45,6 +48,7 @@ typedef NS_ENUM(NSInteger, VCFSourceMode) {
 @property (nonatomic, assign) BOOL          serverListening;
 @property (nonatomic, assign) int           serverPort;
 @property (nonatomic, assign) int           serverClients;
+@property (nonatomic, assign) BOOL          hasShownRespringHint;
 @end
 
 @implementation VCFMainViewController
@@ -55,16 +59,24 @@ typedef NS_ENUM(NSInteger, VCFSourceMode) {
     self.title = @"VCamFree";
     self.view.backgroundColor = [UIColor systemBackgroundColor];
 
+    [self _ensureDirectories];
     [self _loadConfig];
     [self _setupUI];
     [self _registerNotifications];
     [self _refreshServerStatus];
 }
 
+- (void)_ensureDirectories {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    [fm createDirectoryAtPath:kSharedDir withIntermediateDirectories:YES attributes:nil error:nil];
+    [fm createDirectoryAtPath:kMediaDir withIntermediateDirectories:YES attributes:nil error:nil];
+    [fm createDirectoryAtPath:kStreamDir withIntermediateDirectories:YES attributes:nil error:nil];
+}
+
 #pragma mark - UI Setup
 
 - (void)_setupUI {
-    // status banner at top
+    // status banner at top — tappable to toggle camera
     self.statusBanner = [[UILabel alloc] init];
     self.statusBanner.translatesAutoresizingMaskIntoConstraints = NO;
     self.statusBanner.textAlignment = NSTextAlignmentCenter;
@@ -72,6 +84,10 @@ typedef NS_ENUM(NSInteger, VCFSourceMode) {
     self.statusBanner.textColor = [UIColor whiteColor];
     self.statusBanner.layer.cornerRadius = 8;
     self.statusBanner.clipsToBounds = YES;
+    self.statusBanner.userInteractionEnabled = YES;
+    UITapGestureRecognizer *bannerTap = [[UITapGestureRecognizer alloc]
+        initWithTarget:self action:@selector(_bannerTapped)];
+    [self.statusBanner addGestureRecognizer:bannerTap];
     [self.view addSubview:self.statusBanner];
 
     // table view
@@ -98,14 +114,17 @@ typedef NS_ENUM(NSInteger, VCFSourceMode) {
 
 - (void)_updateStatusBanner {
     NSDictionary *status = [NSDictionary dictionaryWithContentsOfFile:kStatusPath];
-    BOOL active = [status[@"active"] boolValue];
+    BOOL hookActive = [status[@"active"] boolValue];
 
-    if (active) {
-        self.statusBanner.text = [NSString stringWithFormat:@"CAMERA ACTIVE — %@",
+    if (self.cameraEnabled && hookActive) {
+        self.statusBanner.text = [NSString stringWithFormat:@"  CAMERA ACTIVE — %@  ",
                                   [status[@"source"] uppercaseString] ?: @""];
         self.statusBanner.backgroundColor = [UIColor colorWithRed:0.15 green:0.65 blue:0.3 alpha:1];
+    } else if (self.cameraEnabled) {
+        self.statusBanner.text = @"  CAMERA ON — Tap to toggle  ";
+        self.statusBanner.backgroundColor = [UIColor colorWithRed:0.2 green:0.5 blue:0.8 alpha:1];
     } else {
-        self.statusBanner.text = @"CAMERA OFF";
+        self.statusBanner.text = @"  CAMERA OFF — Tap to toggle  ";
         self.statusBanner.backgroundColor = [UIColor colorWithRed:0.3 green:0.3 blue:0.35 alpha:1];
     }
 }
@@ -121,7 +140,9 @@ typedef NS_ENUM(NSInteger, VCFSourceMode) {
     if ([src isEqualToString:@"image"])       self.sourceMode = VCFSourceModeImage;
     else if ([src isEqualToString:@"video"])  self.sourceMode = VCFSourceModeVideo;
     else if ([src isEqualToString:@"stream"]) self.sourceMode = VCFSourceModeStream;
-    else self.sourceMode = VCFSourceModeNone;
+    else {
+        self.sourceMode = VCFSourceModeImage;
+    }
 }
 
 - (void)_saveConfig {
@@ -138,8 +159,11 @@ typedef NS_ENUM(NSInteger, VCFSourceMode) {
         @"source_type": srcStr,
         @"media_path": self.selectedMedia ?: @""
     };
+
+    [self _ensureDirectories];
     [cfg writeToFile:kConfigPath atomically:YES];
     notify_post(kNotifConfigChanged.UTF8String);
+    [self _updateStatusBanner];
 }
 
 - (void)_refreshServerStatus {
@@ -182,14 +206,23 @@ typedef NS_ENUM(NSInteger, VCFSourceMode) {
         cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:@"cell"];
     }
 
+    // reset ALL reusable properties to prevent cell leaking
     cell.accessoryType = UITableViewCellAccessoryNone;
     cell.accessoryView = nil;
+    cell.textLabel.text = nil;
     cell.textLabel.textColor = [UIColor labelColor];
+    cell.detailTextLabel.text = nil;
+    cell.detailTextLabel.numberOfLines = 1;
+    cell.imageView.image = nil;
+    cell.imageView.tintColor = nil;
     cell.selectionStyle = UITableViewCellSelectionStyleDefault;
 
     switch (indexPath.section) {
         case 0: {
             cell.textLabel.text = @"Enable Virtual Camera";
+            cell.detailTextLabel.text = self.cameraEnabled ? @"Camera injection active" : @"Tap switch to enable";
+            cell.imageView.image = [UIImage systemImageNamed:@"camera.fill"];
+            cell.imageView.tintColor = self.cameraEnabled ? [UIColor systemGreenColor] : [UIColor systemGrayColor];
             cell.selectionStyle = UITableViewCellSelectionStyleNone;
             if (!self.masterSwitch) {
                 self.masterSwitch = [[UISwitch alloc] init];
@@ -234,7 +267,6 @@ typedef NS_ENUM(NSInteger, VCFSourceMode) {
             } else {
                 cell.textLabel.text = @"Import Media...";
                 cell.textLabel.textColor = [UIColor systemBlueColor];
-                cell.detailTextLabel.text = nil;
                 cell.imageView.image = [UIImage systemImageNamed:@"plus.circle.fill"];
                 cell.imageView.tintColor = [UIColor systemBlueColor];
             }
@@ -345,9 +377,46 @@ typedef NS_ENUM(NSInteger, VCFSourceMode) {
 
 #pragma mark - Actions
 
+- (void)_bannerTapped {
+    self.cameraEnabled = !self.cameraEnabled;
+    self.masterSwitch.on = self.cameraEnabled;
+    [self _saveConfig];
+    [self.tableView reloadSections:[NSIndexSet indexSetWithIndex:0] withRowAnimation:UITableViewRowAnimationNone];
+    [self _showRespringHintIfNeeded];
+}
+
 - (void)_masterSwitchChanged:(UISwitch *)sw {
     self.cameraEnabled = sw.on;
     [self _saveConfig];
+    [self.tableView reloadSections:[NSIndexSet indexSetWithIndex:0] withRowAnimation:UITableViewRowAnimationNone];
+    [self _showRespringHintIfNeeded];
+}
+
+- (void)_showRespringHintIfNeeded {
+    if (self.hasShownRespringHint || !self.cameraEnabled) return;
+    self.hasShownRespringHint = YES;
+
+    NSDictionary *status = [NSDictionary dictionaryWithContentsOfFile:kStatusPath];
+    if ([status[@"active"] boolValue]) return;
+
+    UIAlertController *alert = [UIAlertController
+        alertControllerWithTitle:@"Respring Required"
+        message:@"Camera hook needs a respring to load into the camera process.\n\n"
+                @"After respring:\n"
+                @"1. Open this app\n"
+                @"2. Select an image/video\n"
+                @"3. Enable Virtual Camera\n"
+                @"4. Open Camera app — your media will show"
+        preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Respring Now"
+        style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
+            pid_t pid;
+            const char *argv[] = {"/var/jb/usr/bin/sbreload", NULL};
+            posix_spawn(&pid, argv[0], NULL, NULL, (char **)argv, NULL);
+        }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Later"
+        style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
 }
 
 - (void)_showImportPicker {
@@ -482,7 +551,7 @@ typedef NS_ENUM(NSInteger, VCFSourceMode) {
     if (getifaddrs(&interfaces) == 0) {
         temp = interfaces;
         while (temp != NULL) {
-            if (temp->ifa_addr->sa_family == AF_INET) {
+            if (temp->ifa_addr && temp->ifa_addr->sa_family == AF_INET) {
                 NSString *ifname = [NSString stringWithUTF8String:temp->ifa_name];
                 if ([ifname isEqualToString:@"en0"]) {
                     address = [NSString stringWithUTF8String:

@@ -8,6 +8,13 @@
         <array>
             <string>cameracaptured</string>
             <string>mediaserverd</string>
+            <string>Camera</string>
+        </array>
+        <key>Bundles</key>
+        <array>
+            <string>com.apple.camera</string>
+            <string>com.apple.avfoundation</string>
+            <string>com.apple.coremedia</string>
         </array>
     </dict>
 </dict>
