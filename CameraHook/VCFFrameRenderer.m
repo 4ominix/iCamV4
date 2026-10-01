@@ -1,4 +1,5 @@
 #import "VCFFrameRenderer.h"
+#import <AVFoundation/AVFoundation.h>
 #import <CoreImage/CoreImage.h>
 #import <ImageIO/ImageIO.h>
 

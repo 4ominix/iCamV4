@@ -99,6 +99,9 @@ static void VCFApplyConfig(void) {
 // ──────────────────────────────────────────────
 // CMSampleBuffer replacement
 // ──────────────────────────────────────────────
+static void vcf_copy_dict_entry(const void *key, const void *val, void *ctx) {
+    CFDictionarySetValue((CFMutableDictionaryRef)ctx, key, val);
+}
 static CMSampleBufferRef VCFCreateReplacementBuffer(CMSampleBufferRef original) {
     if (!gInjectionEnabled) return NULL;
 
@@ -133,9 +136,7 @@ static CMSampleBufferRef VCFCreateReplacementBuffer(CMSampleBufferRef original) 
         if (dstAttach && CFArrayGetCount(dstAttach) > 0) {
             CFMutableDictionaryRef srcDict = (CFMutableDictionaryRef)CFArrayGetValueAtIndex(srcAttach, 0);
             CFMutableDictionaryRef dstDict = (CFMutableDictionaryRef)CFArrayGetValueAtIndex(dstAttach, 0);
-            CFDictionaryApplyFunction(srcDict, ^(const void *key, const void *val) {
-                CFDictionarySetValue(dstDict, key, val);
-            }, NULL);
+            CFDictionaryApplyFunction(srcDict, vcf_copy_dict_entry, dstDict);
         }
     }
 

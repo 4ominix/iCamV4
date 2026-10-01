@@ -27,6 +27,9 @@ typedef NS_ENUM(NSInteger, VCFSourceMode) {
 
 // ── main view controller ────────────────────────
 
+@interface VCFMainViewController : UIViewController
+@end
+
 @interface VCFMainViewController () <UITableViewDataSource, UITableViewDelegate,
                                       PHPickerViewControllerDelegate,
                                       UIDocumentPickerDelegate>
