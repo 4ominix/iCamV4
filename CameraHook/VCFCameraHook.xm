@@ -288,7 +288,7 @@ static void VCFInstallCameraHooks(void) {
 // notification handler
 // ──────────────────────────────────────────────
 static void VCFConfigChangedCallback(CFNotificationCenterRef center, void *observer,
-    CFNotificationNameRef name, const void *object, CFDictionaryRef userInfo) {
+    CFNotificationName name, const void *object, CFDictionaryRef userInfo) {
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         VCFApplyConfig();
     });

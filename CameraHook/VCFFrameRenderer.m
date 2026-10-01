@@ -257,7 +257,6 @@ static NSString *const kStreamDir = @"/var/jb/var/mobile/Library/VCamFree/Stream
     CFRelease(blockBuf);
     if (!sampleBuf) return;
 
-    __block CVPixelBufferRef outPB = NULL;
     VTDecodeInfoFlags infoFlags = 0;
     VTDecompressionSessionDecodeFrame(_decompSession, sampleBuf,
         kVTDecodeFrame_EnableAsynchronousDecompression, NULL, &infoFlags);
