@@ -1,0 +1,9 @@
+Package: com.vcamfree.app
+Name: VCamFree
+Version: 1.0.0
+Architecture: iphoneos-arm64
+Description: Free virtual camera for jailbroken iOS. Local media sources, OBS streaming via RTMP, floating controls. No account required.
+Maintainer: LO
+Author: LO & ENI
+Section: Tweaks
+Depends: firmware (>= 15.0), mobilesubstrate

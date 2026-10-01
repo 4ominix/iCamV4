@@ -1,0 +1,10 @@
+#!/bin/sh
+
+STREAM_PLIST="/var/jb/Library/LaunchDaemons/com.vcamfree.streamd.plist"
+
+if [ "$1" = "remove" ]; then
+    launchctl unload "$STREAM_PLIST" 2>/dev/null || true
+    killall VCFStreamDaemon 2>/dev/null || true
+fi
+
+exit 0

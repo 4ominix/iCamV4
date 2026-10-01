@@ -1,0 +1,22 @@
+#!/bin/sh
+
+SHARED_DIR="/var/jb/var/mobile/Library/VCamFree"
+STREAM_PLIST="/var/jb/Library/LaunchDaemons/com.vcamfree.streamd.plist"
+
+mkdir -p "$SHARED_DIR/Media" "$SHARED_DIR/Streams"
+chown -R mobile:mobile "$SHARED_DIR" 2>/dev/null || true
+chmod -R u+rwX,go-rwx "$SHARED_DIR" 2>/dev/null || true
+
+rm -f "$SHARED_DIR/CameraConfig.plist" "$SHARED_DIR/CameraStatus.plist"
+
+chown root:wheel "$STREAM_PLIST" 2>/dev/null || true
+chmod 644 "$STREAM_PLIST" 2>/dev/null || true
+chown root:wheel "/var/jb/usr/libexec/VCFStreamDaemon" 2>/dev/null || true
+chmod 755 "/var/jb/usr/libexec/VCFStreamDaemon" 2>/dev/null || true
+
+launchctl unload "$STREAM_PLIST" 2>/dev/null || true
+launchctl load "$STREAM_PLIST" 2>/dev/null || true
+uicache -p "/var/jb/Applications/VCamFree.app" 2>/dev/null || true
+killall mediaserverd 2>/dev/null || true
+
+exit 0
