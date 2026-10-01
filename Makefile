@@ -11,6 +11,7 @@ SUBPROJECTS = App CameraHook Overlay StreamDaemon
 include $(THEOS)/makefiles/aggregate.mk
 
 after-stage::
+	$(ECHO_NOTHING)cp -a $(THEOS_PROJECT_DIR)/layout/* $(THEOS_STAGING_DIR)/$(ECHO_END)
 	$(ECHO_NOTHING)chmod 755 $(THEOS_STAGING_DIR)/DEBIAN/postinst$(ECHO_END)
 	$(ECHO_NOTHING)chmod 755 $(THEOS_STAGING_DIR)/DEBIAN/prerm$(ECHO_END)
-	$(ECHO_NOTHING)chmod 755 $(THEOS_STAGING_DIR)/usr/libexec/VCFStreamDaemon$(ECHO_END)
+	$(ECHO_NOTHING)chmod 755 $(THEOS_STAGING_DIR)/usr/libexec/VCFStreamDaemon 2>/dev/null || true$(ECHO_END)
