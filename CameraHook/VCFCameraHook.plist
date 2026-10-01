@@ -4,9 +4,10 @@
 <dict>
     <key>Filter</key>
     <dict>
-        <key>Bundles</key>
+        <key>Executables</key>
         <array>
-            <string>com.apple.avfoundation</string>
+            <string>cameracaptured</string>
+            <string>mediaserverd</string>
         </array>
     </dict>
 </dict>

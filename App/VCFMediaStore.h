@@ -14,15 +14,10 @@ typedef NS_ENUM(NSInteger, VCFMediaType) {
 @end
 
 @interface VCFMediaStore : NSObject
-
-@property (nonatomic, readonly) NSString *mediaDirectory;
 @property (nonatomic, readonly) NSArray<VCFMediaItem *> *items;
-
 + (instancetype)shared;
-
 - (void)reload;
 - (VCFMediaItem *)importImage:(UIImage *)image withName:(NSString *)name;
 - (VCFMediaItem *)importFileAtURL:(NSURL *)url;
 - (BOOL)deleteItem:(VCFMediaItem *)item;
-
 @end

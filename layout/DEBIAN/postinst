@@ -7,7 +7,7 @@ mkdir -p "$SHARED_DIR/Media" "$SHARED_DIR/Streams"
 chown -R mobile:mobile "$SHARED_DIR" 2>/dev/null || true
 chmod -R u+rwX,go-rwx "$SHARED_DIR" 2>/dev/null || true
 
-rm -f "$SHARED_DIR/CameraConfig.plist" "$SHARED_DIR/CameraStatus.plist"
+rm -f "$SHARED_DIR/CameraConfig.plist" "$SHARED_DIR/CameraStatus.plist" "$SHARED_DIR/Status."*.plist
 
 chown root:wheel "$STREAM_PLIST" 2>/dev/null || true
 chmod 644 "$STREAM_PLIST" 2>/dev/null || true
@@ -17,6 +17,7 @@ chmod 755 "/var/jb/usr/libexec/VCFStreamDaemon" 2>/dev/null || true
 launchctl unload "$STREAM_PLIST" 2>/dev/null || true
 launchctl load "$STREAM_PLIST" 2>/dev/null || true
 uicache -p "/var/jb/Applications/VCamFree.app" 2>/dev/null || true
+killall cameracaptured 2>/dev/null || true
 killall mediaserverd 2>/dev/null || true
 
 exit 0

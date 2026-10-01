@@ -7,28 +7,10 @@
 #import <arpa/inet.h>
 #import <spawn.h>
 #import "VCFMediaStore.h"
-
-// ── paths & notifications ───────────────────────
-static NSString *const kSharedDir   = @"/var/jb/var/mobile/Library/VCamFree";
-static NSString *const kConfigPath  = @"/var/jb/var/mobile/Library/VCamFree/CameraConfig.plist";
-static NSString *const kStatusPath  = @"/var/jb/var/mobile/Library/VCamFree/CameraStatus.plist";
-static NSString *const kServerPath  = @"/var/jb/var/mobile/Library/VCamFree/ServerStatus.plist";
-static NSString *const kStreamDir   = @"/var/jb/var/mobile/Library/VCamFree/Streams";
-static NSString *const kMediaDir    = @"/var/jb/var/mobile/Library/VCamFree/Media";
-
-static NSString *const kNotifConfigChanged = @"com.vcamfree.camera.config.changed";
-static NSString *const kNotifStatusChanged = @"com.vcamfree.camera.status.changed";
-static NSString *const kNotifServerChanged = @"com.vcamfree.server.status.changed";
-
-// ── source type enum ────────────────────────────
-typedef NS_ENUM(NSInteger, VCFSourceMode) {
-    VCFSourceModeNone = 0,
-    VCFSourceModeImage,
-    VCFSourceModeVideo,
-    VCFSourceModeStream
-};
-
-// ── main view controller ────────────────────────
+#import "../Core/VCFSettings.h"
+#import "../Core/VCFPaths.h"
+#import "../Core/VCFFrameEngine.h"
+#import "VCFAdjustments.h"
 
 @interface VCFMainViewController : UIViewController
 @end
@@ -37,58 +19,53 @@ typedef NS_ENUM(NSInteger, VCFSourceMode) {
                                       PHPickerViewControllerDelegate,
                                       UIDocumentPickerDelegate>
 @property (nonatomic, strong) UITableView *tableView;
-@property (nonatomic, strong) UISwitch    *masterSwitch;
-@property (nonatomic, strong) UILabel     *statusBanner;
-@property (nonatomic, strong) UILabel     *serverStatusLabel;
-@property (nonatomic, strong) UILabel     *obsURLLabel;
-
-@property (nonatomic, assign) BOOL          cameraEnabled;
-@property (nonatomic, assign) VCFSourceMode sourceMode;
-@property (nonatomic, copy)   NSString     *selectedMedia;
-@property (nonatomic, assign) BOOL          serverListening;
-@property (nonatomic, assign) int           serverPort;
-@property (nonatomic, assign) int           serverClients;
-@property (nonatomic, assign) BOOL          hasShownRespringHint;
-
-@property (nonatomic, strong) UISlider *sliderOffsetX;
-@property (nonatomic, strong) UISlider *sliderOffsetY;
-@property (nonatomic, strong) UISlider *sliderZoom;
-@property (nonatomic, strong) UISlider *sliderBrightness;
-@property (nonatomic, strong) UISlider *sliderSaturation;
-
-@property (nonatomic, assign) float cfgOffsetX;
-@property (nonatomic, assign) float cfgOffsetY;
-@property (nonatomic, assign) float cfgZoom;
-@property (nonatomic, assign) float cfgBrightness;
-@property (nonatomic, assign) float cfgSaturation;
+@property (nonatomic, strong) UISwitch *masterSwitch;
+@property (nonatomic, strong) UISwitch *loopSwitch;
+@property (nonatomic, strong) UISwitch *mirrorSwitch;
+@property (nonatomic, strong) UISwitch *floatingSwitch;
+@property (nonatomic, strong) UILabel *statusBanner;
+@property (nonatomic, strong) UILabel *diagLabel;
+@property (nonatomic, strong) UIImageView *previewView;
+@property (nonatomic, strong) VCFAdjustments *adjustPanel;
+@property (nonatomic, strong) VCFFrameEngine *previewEngine;
+@property (nonatomic, strong) CADisplayLink *displayLink;
+@property (nonatomic, strong) NSDictionary *currentSettings;
 @end
 
 @implementation VCFMainViewController
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-
     self.title = @"VCamFree";
     self.view.backgroundColor = [UIColor systemBackgroundColor];
 
-    [self _ensureDirectories];
-    [self _loadConfig];
+    NSString *base = VCFStorageDirectory(NULL);
+    if (base) {
+        NSFileManager *fm = [NSFileManager defaultManager];
+        [fm createDirectoryAtPath:base withIntermediateDirectories:YES attributes:nil error:nil];
+        [fm createDirectoryAtPath:[base stringByAppendingPathComponent:@"Media"]
+      withIntermediateDirectories:YES attributes:nil error:nil];
+    }
+
+    [self _loadSettings];
     [self _setupUI];
     [self _registerNotifications];
-    [self _refreshServerStatus];
+    [self _startPreview];
 }
 
-- (void)_ensureDirectories {
-    NSFileManager *fm = [NSFileManager defaultManager];
-    [fm createDirectoryAtPath:kSharedDir withIntermediateDirectories:YES attributes:nil error:nil];
-    [fm createDirectoryAtPath:kMediaDir withIntermediateDirectories:YES attributes:nil error:nil];
-    [fm createDirectoryAtPath:kStreamDir withIntermediateDirectories:YES attributes:nil error:nil];
+- (void)_loadSettings {
+    self.currentSettings = VCFReadSettings(NULL);
 }
 
-#pragma mark - UI Setup
+- (void)_saveEdit:(void (^)(NSMutableDictionary *))edit {
+    VCFUpdateSettings(edit, NULL);
+    [self _loadSettings];
+    [self _updateStatusBanner];
+}
+
+#pragma mark - UI
 
 - (void)_setupUI {
-    // status banner at top — tappable to toggle camera
     self.statusBanner = [[UILabel alloc] init];
     self.statusBanner.translatesAutoresizingMaskIntoConstraints = NO;
     self.statusBanner.textAlignment = NSTextAlignmentCenter;
@@ -97,12 +74,18 @@ typedef NS_ENUM(NSInteger, VCFSourceMode) {
     self.statusBanner.layer.cornerRadius = 8;
     self.statusBanner.clipsToBounds = YES;
     self.statusBanner.userInteractionEnabled = YES;
-    UITapGestureRecognizer *bannerTap = [[UITapGestureRecognizer alloc]
-        initWithTarget:self action:@selector(_bannerTapped)];
-    [self.statusBanner addGestureRecognizer:bannerTap];
+    [self.statusBanner addGestureRecognizer:
+     [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(_bannerTapped)]];
     [self.view addSubview:self.statusBanner];
 
-    // table view
+    self.previewView = [[UIImageView alloc] init];
+    self.previewView.translatesAutoresizingMaskIntoConstraints = NO;
+    self.previewView.contentMode = UIViewContentModeScaleAspectFit;
+    self.previewView.backgroundColor = [UIColor blackColor];
+    self.previewView.layer.cornerRadius = 8;
+    self.previewView.clipsToBounds = YES;
+    [self.view addSubview:self.previewView];
+
     self.tableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStyleInsetGrouped];
     self.tableView.translatesAutoresizingMaskIntoConstraints = NO;
     self.tableView.dataSource = self;
@@ -115,7 +98,12 @@ typedef NS_ENUM(NSInteger, VCFSourceMode) {
         [self.statusBanner.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-16],
         [self.statusBanner.heightAnchor constraintEqualToConstant:36],
 
-        [self.tableView.topAnchor constraintEqualToAnchor:self.statusBanner.bottomAnchor constant:8],
+        [self.previewView.topAnchor constraintEqualToAnchor:self.statusBanner.bottomAnchor constant:8],
+        [self.previewView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:16],
+        [self.previewView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-16],
+        [self.previewView.heightAnchor constraintEqualToConstant:200],
+
+        [self.tableView.topAnchor constraintEqualToAnchor:self.previewView.bottomAnchor constant:8],
         [self.tableView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
         [self.tableView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
         [self.tableView.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
@@ -125,15 +113,14 @@ typedef NS_ENUM(NSInteger, VCFSourceMode) {
 }
 
 - (void)_updateStatusBanner {
-    NSDictionary *status = [NSDictionary dictionaryWithContentsOfFile:kStatusPath];
-    BOOL hookActive = [status[@"active"] boolValue];
-
-    if (self.cameraEnabled && hookActive) {
-        self.statusBanner.text = [NSString stringWithFormat:@"  CAMERA ACTIVE — %@  ",
-                                  [status[@"source"] uppercaseString] ?: @""];
+    NSDictionary *s = self.currentSettings;
+    BOOL enabled = [s[@"Enabled"] boolValue];
+    NSString *media = s[@"Media"];
+    if (enabled && media.length) {
+        self.statusBanner.text = [NSString stringWithFormat:@"  CAMERA ACTIVE — %@  ", media];
         self.statusBanner.backgroundColor = [UIColor colorWithRed:0.15 green:0.65 blue:0.3 alpha:1];
-    } else if (self.cameraEnabled) {
-        self.statusBanner.text = @"  CAMERA ON — Tap to toggle  ";
+    } else if (enabled) {
+        self.statusBanner.text = @"  CAMERA ON — No media selected  ";
         self.statusBanner.backgroundColor = [UIColor colorWithRed:0.2 green:0.5 blue:0.8 alpha:1];
     } else {
         self.statusBanner.text = @"  CAMERA OFF — Tap to toggle  ";
@@ -141,73 +128,33 @@ typedef NS_ENUM(NSInteger, VCFSourceMode) {
     }
 }
 
-#pragma mark - Config
-
-- (void)_loadConfig {
-    NSDictionary *cfg = [NSDictionary dictionaryWithContentsOfFile:kConfigPath];
-    self.cameraEnabled = [cfg[@"enabled"] boolValue];
-    self.selectedMedia = cfg[@"media_path"];
-
-    NSString *src = cfg[@"source_type"];
-    if ([src isEqualToString:@"image"])       self.sourceMode = VCFSourceModeImage;
-    else if ([src isEqualToString:@"video"])  self.sourceMode = VCFSourceModeVideo;
-    else if ([src isEqualToString:@"stream"]) self.sourceMode = VCFSourceModeStream;
-    else {
-        self.sourceMode = VCFSourceModeImage;
-    }
-
-    self.cfgOffsetX    = [cfg[@"offset_x"] floatValue];
-    self.cfgOffsetY    = [cfg[@"offset_y"] floatValue];
-    self.cfgZoom       = [cfg[@"scale"] floatValue] ?: 1.0f;
-    self.cfgBrightness = [cfg[@"color_brightness"] floatValue];
-    self.cfgSaturation = [cfg[@"color_saturation"] floatValue] ?: 1.0f;
+- (void)_startPreview {
+    self.previewEngine = [[VCFFrameEngine alloc] initForPreview:YES];
+    self.displayLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(_renderPreview)];
+    self.displayLink.preferredFrameRateRange = CAFrameRateRangeMake(10, 30, 30);
+    [self.displayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
 }
 
-- (void)_saveConfig {
-    NSString *srcStr;
-    switch (self.sourceMode) {
-        case VCFSourceModeImage:  srcStr = @"image"; break;
-        case VCFSourceModeVideo:  srcStr = @"video"; break;
-        case VCFSourceModeStream: srcStr = @"stream"; break;
-        default: srcStr = @"none"; break;
-    }
-
-    NSDictionary *cfg = @{
-        @"enabled": @(self.cameraEnabled),
-        @"source_type": srcStr,
-        @"media_path": self.selectedMedia ?: @"",
-        @"offset_x": @(self.cfgOffsetX),
-        @"offset_y": @(self.cfgOffsetY),
-        @"scale": @(self.cfgZoom),
-        @"color_brightness": @(self.cfgBrightness),
-        @"color_saturation": @(self.cfgSaturation)
-    };
-
-    [self _ensureDirectories];
-    [cfg writeToFile:kConfigPath atomically:YES];
-    notify_post(kNotifConfigChanged.UTF8String);
-    [self _updateStatusBanner];
-}
-
-- (void)_refreshServerStatus {
-    NSDictionary *server = [NSDictionary dictionaryWithContentsOfFile:kServerPath];
-    self.serverListening = [server[@"listening"] boolValue];
-    self.serverPort = [server[@"port"] intValue] ?: 1935;
-    self.serverClients = [server[@"clients"] intValue];
+- (void)_renderPreview {
+    CVPixelBufferRef frame = [self.previewEngine copyFrameForWidth:360 height:640
+                                                            format:kCVPixelFormatType_32BGRA];
+    if (!frame) return;
+    CIImage *ci = [CIImage imageWithCVPixelBuffer:frame];
+    CVPixelBufferRelease(frame);
+    if (ci) self.previewView.image = [UIImage imageWithCIImage:ci];
 }
 
 #pragma mark - TableView
 
-// sections: 0=master switch, 1=source mode, 2=media library, 3=position/color, 4=OBS/RTMP, 5=actions
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { return 6; }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     switch (section) {
-        case 0: return 1;
-        case 1: return 3;
-        case 2: return [VCFMediaStore shared].items.count + 1;
-        case 3: return 6; // offsetX, offsetY, zoom, brightness, saturation, reset
-        case 4: return 2;
+        case 0: return 4;
+        case 1: return [VCFMediaStore shared].items.count + 1;
+        case 2: return 2;
+        case 3: return 2;
+        case 4: return 1;
         case 5: return 1;
     }
     return 0;
@@ -215,65 +162,79 @@ typedef NS_ENUM(NSInteger, VCFSourceMode) {
 
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
     switch (section) {
-        case 0: return @"Virtual Camera";
-        case 1: return @"Source Mode";
-        case 2: return @"Media Library";
-        case 3: return @"Position & Color";
-        case 4: return @"OBS / RTMP Stream";
+        case 0: return @"Controls";
+        case 1: return @"Media Library";
+        case 2: return @"Fill Mode";
+        case 3: return @"OBS / RTMP";
+        case 4: return @"Diagnostics";
         case 5: return @"Maintenance";
     }
     return nil;
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
-    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"cell"];
-    if (!cell) {
-        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:@"cell"];
-    }
+    NSString *reuseID = [NSString stringWithFormat:@"s%ld_r%ld", (long)indexPath.section, (long)indexPath.row];
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:reuseID];
+    if (!cell)
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:reuseID];
 
-    // reset ALL reusable properties to prevent cell leaking
     cell.accessoryType = UITableViewCellAccessoryNone;
     cell.accessoryView = nil;
-    cell.textLabel.text = nil;
     cell.textLabel.textColor = [UIColor labelColor];
-    cell.detailTextLabel.text = nil;
-    cell.detailTextLabel.numberOfLines = 1;
-    cell.imageView.image = nil;
-    cell.imageView.tintColor = nil;
     cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+    cell.imageView.image = nil;
+
+    NSDictionary *s = self.currentSettings;
 
     switch (indexPath.section) {
         case 0: {
-            cell.textLabel.text = @"Enable Virtual Camera";
-            cell.detailTextLabel.text = self.cameraEnabled ? @"Camera injection active" : @"Tap switch to enable";
-            cell.imageView.image = [UIImage systemImageNamed:@"camera.fill"];
-            cell.imageView.tintColor = self.cameraEnabled ? [UIColor systemGreenColor] : [UIColor systemGrayColor];
             cell.selectionStyle = UITableViewCellSelectionStyleNone;
-            if (!self.masterSwitch) {
-                self.masterSwitch = [[UISwitch alloc] init];
-                [self.masterSwitch addTarget:self action:@selector(_masterSwitchChanged:)
-                            forControlEvents:UIControlEventValueChanged];
+            if (indexPath.row == 0) {
+                cell.textLabel.text = @"Enable Virtual Camera";
+                cell.imageView.image = [UIImage systemImageNamed:@"camera.fill"];
+                cell.imageView.tintColor = [s[@"Enabled"] boolValue] ?
+                    [UIColor systemGreenColor] : [UIColor systemGrayColor];
+                if (!self.masterSwitch) {
+                    self.masterSwitch = [[UISwitch alloc] init];
+                    [self.masterSwitch addTarget:self action:@selector(_masterToggle:)
+                                forControlEvents:UIControlEventValueChanged];
+                }
+                self.masterSwitch.on = [s[@"Enabled"] boolValue];
+                cell.accessoryView = self.masterSwitch;
+            } else if (indexPath.row == 1) {
+                cell.textLabel.text = @"Loop Video";
+                cell.imageView.image = [UIImage systemImageNamed:@"repeat"];
+                if (!self.loopSwitch) {
+                    self.loopSwitch = [[UISwitch alloc] init];
+                    [self.loopSwitch addTarget:self action:@selector(_loopToggle:)
+                              forControlEvents:UIControlEventValueChanged];
+                }
+                self.loopSwitch.on = [s[@"Loop"] boolValue];
+                cell.accessoryView = self.loopSwitch;
+            } else if (indexPath.row == 2) {
+                cell.textLabel.text = @"Mirror";
+                cell.imageView.image = [UIImage systemImageNamed:@"arrow.left.and.right"];
+                if (!self.mirrorSwitch) {
+                    self.mirrorSwitch = [[UISwitch alloc] init];
+                    [self.mirrorSwitch addTarget:self action:@selector(_mirrorToggle:)
+                                forControlEvents:UIControlEventValueChanged];
+                }
+                self.mirrorSwitch.on = [s[@"Mirror"] boolValue];
+                cell.accessoryView = self.mirrorSwitch;
+            } else {
+                cell.textLabel.text = @"Floating Controls";
+                cell.imageView.image = [UIImage systemImageNamed:@"pip"];
+                if (!self.floatingSwitch) {
+                    self.floatingSwitch = [[UISwitch alloc] init];
+                    [self.floatingSwitch addTarget:self action:@selector(_floatingToggle:)
+                                  forControlEvents:UIControlEventValueChanged];
+                }
+                self.floatingSwitch.on = [s[@"Floating"] boolValue];
+                cell.accessoryView = self.floatingSwitch;
             }
-            self.masterSwitch.on = self.cameraEnabled;
-            cell.accessoryView = self.masterSwitch;
             break;
         }
         case 1: {
-            NSArray *titles = @[@"Image", @"Video File", @"RTMP Stream (OBS)"];
-            NSArray *subtitles = @[@"Static image as camera", @"Loop a video file",
-                                   @"Live stream from OBS Studio"];
-            NSArray *icons = @[@"photo", @"film", @"antenna.radiowaves.left.and.right"];
-            cell.textLabel.text = titles[indexPath.row];
-            cell.detailTextLabel.text = subtitles[indexPath.row];
-            cell.imageView.image = [UIImage systemImageNamed:icons[indexPath.row]];
-            cell.imageView.tintColor = [UIColor systemBlueColor];
-
-            VCFSourceMode mode = (VCFSourceMode)(indexPath.row + 1);
-            cell.accessoryType = (self.sourceMode == mode)
-                ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
-            break;
-        }
-        case 2: {
             NSArray<VCFMediaItem *> *items = [VCFMediaStore shared].items;
             if (indexPath.row < (NSInteger)items.count) {
                 VCFMediaItem *item = items[indexPath.row];
@@ -285,8 +246,7 @@ typedef NS_ENUM(NSInteger, VCFSourceMode) {
                 cell.imageView.image = [UIImage systemImageNamed:
                     item.type == VCFMediaTypeVideo ? @"film" : @"photo"];
                 cell.imageView.tintColor = [UIColor systemOrangeColor];
-
-                BOOL selected = [self.selectedMedia isEqualToString:item.filename];
+                BOOL selected = [s[@"Media"] isEqualToString:item.filename];
                 cell.accessoryType = selected ? UITableViewCellAccessoryCheckmark
                                               : UITableViewCellAccessoryNone;
             } else {
@@ -297,71 +257,74 @@ typedef NS_ENUM(NSInteger, VCFSourceMode) {
             }
             break;
         }
-        case 3: {
-            cell.selectionStyle = UITableViewCellSelectionStyleNone;
-            if (indexPath.row < 5) {
-                NSArray *labels = @[@"X Offset", @"Y Offset", @"Zoom", @"Brightness", @"Saturation"];
-                NSArray *icons  = @[@"arrow.left.and.right", @"arrow.up.and.down",
-                                    @"magnifyingglass", @"sun.max", @"paintpalette"];
-                cell.textLabel.text = labels[indexPath.row];
-                cell.imageView.image = [UIImage systemImageNamed:icons[indexPath.row]];
-                cell.imageView.tintColor = [UIColor systemIndigoColor];
-
-                UISlider *slider = [[UISlider alloc] initWithFrame:CGRectMake(0, 0, 160, 30)];
-                slider.tag = 500 + indexPath.row;
-                [slider addTarget:self action:@selector(_adjustSliderChanged:)
-                         forControlEvents:UIControlEventValueChanged];
-
-                switch (indexPath.row) {
-                    case 0: slider.minimumValue = -0.5f; slider.maximumValue = 0.5f;
-                            slider.value = self.cfgOffsetX; self.sliderOffsetX = slider; break;
-                    case 1: slider.minimumValue = -0.5f; slider.maximumValue = 0.5f;
-                            slider.value = self.cfgOffsetY; self.sliderOffsetY = slider; break;
-                    case 2: slider.minimumValue = 0.5f; slider.maximumValue = 3.0f;
-                            slider.value = self.cfgZoom; self.sliderZoom = slider; break;
-                    case 3: slider.minimumValue = -0.5f; slider.maximumValue = 0.5f;
-                            slider.value = self.cfgBrightness; self.sliderBrightness = slider; break;
-                    case 4: slider.minimumValue = 0.0f; slider.maximumValue = 2.0f;
-                            slider.value = self.cfgSaturation; self.sliderSaturation = slider; break;
-                }
-                cell.accessoryView = slider;
+        case 2: {
+            if (indexPath.row == 0) {
+                cell.textLabel.text = @"Fit";
+                cell.detailTextLabel.text = @"Show full image with black bars";
+                cell.accessoryType = ![s[@"Fill"] boolValue] ? UITableViewCellAccessoryCheckmark
+                                                              : UITableViewCellAccessoryNone;
             } else {
-                cell.textLabel.text = @"Reset All";
-                cell.textLabel.textColor = [UIColor systemOrangeColor];
-                cell.imageView.image = [UIImage systemImageNamed:@"arrow.counterclockwise"];
-                cell.imageView.tintColor = [UIColor systemOrangeColor];
-                cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+                cell.textLabel.text = @"Fill";
+                cell.detailTextLabel.text = @"Fill frame, crop edges";
+                cell.accessoryType = [s[@"Fill"] boolValue] ? UITableViewCellAccessoryCheckmark
+                                                             : UITableViewCellAccessoryNone;
             }
             break;
         }
-        case 4: {
+        case 3: {
             if (indexPath.row == 0) {
+                NSString *base = VCFStorageDirectory(NULL);
+                NSString *serverPath = [base stringByAppendingPathComponent:@"ServerStatus.plist"];
+                NSDictionary *server = [NSDictionary dictionaryWithContentsOfFile:serverPath];
+                BOOL listening = [server[@"listening"] boolValue];
+                int clients = [server[@"clients"] intValue];
+                int port = [server[@"port"] intValue] ?: 1935;
                 cell.textLabel.text = @"RTMP Server";
-                cell.detailTextLabel.text = [NSString stringWithFormat:@"%@ — port %d, %d client%s",
-                    self.serverListening ? @"Running" : @"Stopped",
-                    self.serverPort, self.serverClients,
-                    self.serverClients == 1 ? "" : "s"];
+                cell.detailTextLabel.text = [NSString stringWithFormat:@"%@ — :%d, %d client%s",
+                    listening ? @"Running" : @"Stopped", port, clients, clients == 1 ? "" : "s"];
                 cell.imageView.image = [UIImage systemImageNamed:
-                    self.serverListening ? @"checkmark.circle.fill" : @"xmark.circle"];
-                cell.imageView.tintColor = self.serverListening
-                    ? [UIColor systemGreenColor] : [UIColor systemRedColor];
+                    listening ? @"checkmark.circle.fill" : @"xmark.circle"];
+                cell.imageView.tintColor = listening ? [UIColor systemGreenColor] : [UIColor systemRedColor];
                 cell.selectionStyle = UITableViewCellSelectionStyleNone;
             } else {
                 NSString *localIP = [self _localIPAddress];
-                NSString *obsURL = [NSString stringWithFormat:@"rtmp://%@:%d/live",
-                                    localIP ?: @"<device-ip>", self.serverPort];
-                cell.textLabel.text = @"OBS URL";
-                cell.detailTextLabel.text = obsURL;
-                cell.detailTextLabel.numberOfLines = 0;
+                cell.textLabel.text = @"Copy OBS URL";
+                cell.detailTextLabel.text = [NSString stringWithFormat:@"rtmp://%@:1935/live",
+                                             localIP ?: @"<ip>"];
                 cell.imageView.image = [UIImage systemImageNamed:@"doc.on.doc"];
                 cell.imageView.tintColor = [UIColor systemTealColor];
             }
             break;
         }
+        case 4: {
+            cell.selectionStyle = UITableViewCellSelectionStyleNone;
+            cell.textLabel.text = @"Hook Status";
+            cell.textLabel.textColor = [UIColor systemGrayColor];
+            NSString *base = VCFStorageDirectory(NULL);
+            NSMutableString *diag = [NSMutableString new];
+            for (NSString *proc in @[@"cameracaptured", @"mediaserverd"]) {
+                NSString *pattern = [NSString stringWithFormat:@"Status.%@.", proc];
+                NSArray *files = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:base error:nil];
+                for (NSString *f in files) {
+                    if (![f hasPrefix:pattern]) continue;
+                    NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:
+                                       [base stringByAppendingPathComponent:f]];
+                    if (!d) continue;
+                    [diag appendFormat:@"%@: %@ hooks=%@ replaced=%@\n",
+                     d[@"Host"] ?: proc, d[@"State"] ?: @"?",
+                     d[@"Hooks"] ?: @"0", d[@"Replaced"] ?: @"0"];
+                }
+            }
+            cell.detailTextLabel.text = diag.length ? diag : @"No hook status files found";
+            cell.detailTextLabel.numberOfLines = 0;
+            cell.imageView.image = [UIImage systemImageNamed:@"info.circle"];
+            cell.imageView.tintColor = [UIColor systemGrayColor];
+            break;
+        }
         case 5: {
-            cell.textLabel.text = @"Clear Stream Cache";
+            cell.textLabel.text = @"Respring";
             cell.textLabel.textColor = [UIColor systemRedColor];
-            cell.imageView.image = [UIImage systemImageNamed:@"trash"];
+            cell.imageView.image = [UIImage systemImageNamed:@"arrow.clockwise"];
             cell.imageView.tintColor = [UIColor systemRedColor];
             break;
         }
@@ -369,141 +332,111 @@ typedef NS_ENUM(NSInteger, VCFSourceMode) {
     return cell;
 }
 
-#pragma mark - TableView Delegate
-
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
 
     switch (indexPath.section) {
         case 1: {
-            self.sourceMode = (VCFSourceMode)(indexPath.row + 1);
-            [self _saveConfig];
-            [tableView reloadSections:[NSIndexSet indexSetWithIndex:1] withRowAnimation:UITableViewRowAnimationNone];
-            break;
-        }
-        case 2: {
             NSArray<VCFMediaItem *> *items = [VCFMediaStore shared].items;
             if (indexPath.row < (NSInteger)items.count) {
                 VCFMediaItem *item = items[indexPath.row];
-                self.selectedMedia = item.filename;
-                self.sourceMode = (item.type == VCFMediaTypeVideo) ? VCFSourceModeVideo : VCFSourceModeImage;
-                [self _saveConfig];
+                NSString *kind = item.type == VCFMediaTypeVideo ? @"video" : @"image";
+                [self _saveEdit:^(NSMutableDictionary *s) {
+                    s[@"Media"] = item.filename;
+                    s[@"Kind"] = kind;
+                }];
                 [tableView reloadData];
             } else {
                 [self _showImportPicker];
             }
             break;
         }
-        case 3: {
-            if (indexPath.row == 5) {
-                self.cfgOffsetX = 0; self.cfgOffsetY = 0; self.cfgZoom = 1.0f;
-                self.cfgBrightness = 0; self.cfgSaturation = 1.0f;
-                if (self.sliderOffsetX)    self.sliderOffsetX.value = 0;
-                if (self.sliderOffsetY)    self.sliderOffsetY.value = 0;
-                if (self.sliderZoom)       self.sliderZoom.value = 1.0f;
-                if (self.sliderBrightness) self.sliderBrightness.value = 0;
-                if (self.sliderSaturation) self.sliderSaturation.value = 1.0f;
-                [self _saveConfig];
-            }
+        case 2: {
+            [self _saveEdit:^(NSMutableDictionary *s) {
+                s[@"Fill"] = @(indexPath.row == 1);
+            }];
+            [tableView reloadSections:[NSIndexSet indexSetWithIndex:2]
+                     withRowAnimation:UITableViewRowAnimationNone];
             break;
         }
-        case 4: {
+        case 3: {
             if (indexPath.row == 1) {
                 NSString *localIP = [self _localIPAddress];
-                NSString *obsURL = [NSString stringWithFormat:@"rtmp://%@:%d/live",
-                                    localIP ?: @"<device-ip>", self.serverPort];
-                [UIPasteboard generalPasteboard].string = obsURL;
-
-                UIAlertController *alert = [UIAlertController
-                    alertControllerWithTitle:@"Copied"
-                    message:[NSString stringWithFormat:@"OBS URL copied:\n%@", obsURL]
-                    preferredStyle:UIAlertControllerStyleAlert];
-                [alert addAction:[UIAlertAction actionWithTitle:@"OK"
-                    style:UIAlertActionStyleDefault handler:nil]];
-                [self presentViewController:alert animated:YES completion:nil];
+                NSString *url = [NSString stringWithFormat:@"rtmp://%@:1935/live", localIP ?: @"<ip>"];
+                [UIPasteboard generalPasteboard].string = url;
+                UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Copied"
+                    message:url preferredStyle:UIAlertControllerStyleAlert];
+                [a addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+                [self presentViewController:a animated:YES completion:nil];
             }
             break;
         }
         case 5: {
-            [self _clearStreamCache];
+            UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Respring?"
+                message:@"This will restart SpringBoard to reload hooks."
+                preferredStyle:UIAlertControllerStyleAlert];
+            [a addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+            [a addAction:[UIAlertAction actionWithTitle:@"Respring" style:UIAlertActionStyleDestructive
+                handler:^(UIAlertAction *action) {
+                    pid_t pid;
+                    const char *argv[] = {"/var/jb/usr/bin/sbreload", NULL};
+                    posix_spawn(&pid, argv[0], NULL, NULL, (char **)argv, NULL);
+                }]];
+            [self presentViewController:a animated:YES completion:nil];
             break;
         }
     }
 }
 
 - (BOOL)tableView:(UITableView *)tableView canEditRowAtIndexPath:(NSIndexPath *)indexPath {
-    return indexPath.section == 2 && indexPath.row < (NSInteger)[VCFMediaStore shared].items.count;
+    return indexPath.section == 1 && indexPath.row < (NSInteger)[VCFMediaStore shared].items.count;
 }
 
-- (void)tableView:(UITableView *)tableView commitEditingStyle:(UITableViewCellEditingStyle)editingStyle
+- (void)tableView:(UITableView *)tableView commitEditingStyle:(UITableViewCellEditingStyle)style
     forRowAtIndexPath:(NSIndexPath *)indexPath {
-    if (editingStyle != UITableViewCellEditingStyleDelete) return;
+    if (style != UITableViewCellEditingStyleDelete) return;
     NSArray<VCFMediaItem *> *items = [VCFMediaStore shared].items;
     if (indexPath.row >= (NSInteger)items.count) return;
 
     VCFMediaItem *item = items[indexPath.row];
-    if ([self.selectedMedia isEqualToString:item.filename]) {
-        self.selectedMedia = nil;
+    NSString *currentMedia = self.currentSettings[@"Media"];
+    if ([currentMedia isEqualToString:item.filename]) {
+        [self _saveEdit:^(NSMutableDictionary *s) { s[@"Media"] = @""; }];
     }
     [[VCFMediaStore shared] deleteItem:item];
-    [self _saveConfig];
-    [tableView reloadSections:[NSIndexSet indexSetWithIndex:2] withRowAnimation:UITableViewRowAnimationAutomatic];
+    [tableView reloadSections:[NSIndexSet indexSetWithIndex:1]
+             withRowAnimation:UITableViewRowAnimationAutomatic];
 }
 
-#pragma mark - Actions
+#pragma mark - Toggles
 
 - (void)_bannerTapped {
-    self.cameraEnabled = !self.cameraEnabled;
-    self.masterSwitch.on = self.cameraEnabled;
-    [self _saveConfig];
-    [self.tableView reloadSections:[NSIndexSet indexSetWithIndex:0] withRowAnimation:UITableViewRowAnimationNone];
-    [self _showRespringHintIfNeeded];
+    BOOL current = [self.currentSettings[@"Enabled"] boolValue];
+    [self _saveEdit:^(NSMutableDictionary *s) { s[@"Enabled"] = @(!current); }];
+    self.masterSwitch.on = !current;
+    [self.tableView reloadSections:[NSIndexSet indexSetWithIndex:0]
+                  withRowAnimation:UITableViewRowAnimationNone];
 }
 
-- (void)_masterSwitchChanged:(UISwitch *)sw {
-    self.cameraEnabled = sw.on;
-    [self _saveConfig];
-    [self.tableView reloadSections:[NSIndexSet indexSetWithIndex:0] withRowAnimation:UITableViewRowAnimationNone];
-    [self _showRespringHintIfNeeded];
+- (void)_masterToggle:(UISwitch *)sw {
+    [self _saveEdit:^(NSMutableDictionary *s) { s[@"Enabled"] = @(sw.on); }];
+    [self.tableView reloadSections:[NSIndexSet indexSetWithIndex:0]
+                  withRowAnimation:UITableViewRowAnimationNone];
 }
 
-- (void)_showRespringHintIfNeeded {
-    if (self.hasShownRespringHint || !self.cameraEnabled) return;
-    self.hasShownRespringHint = YES;
-
-    NSDictionary *status = [NSDictionary dictionaryWithContentsOfFile:kStatusPath];
-    if ([status[@"active"] boolValue]) return;
-
-    UIAlertController *alert = [UIAlertController
-        alertControllerWithTitle:@"Respring Required"
-        message:@"Camera hook needs a respring to load into the camera process.\n\n"
-                @"After respring:\n"
-                @"1. Open this app\n"
-                @"2. Select an image/video\n"
-                @"3. Enable Virtual Camera\n"
-                @"4. Open Camera app — your media will show"
-        preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"Respring Now"
-        style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
-            pid_t pid;
-            const char *argv[] = {"/var/jb/usr/bin/sbreload", NULL};
-            posix_spawn(&pid, argv[0], NULL, NULL, (char **)argv, NULL);
-        }]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"Later"
-        style:UIAlertActionStyleCancel handler:nil]];
-    [self presentViewController:alert animated:YES completion:nil];
+- (void)_loopToggle:(UISwitch *)sw {
+    [self _saveEdit:^(NSMutableDictionary *s) { s[@"Loop"] = @(sw.on); }];
 }
 
-- (void)_adjustSliderChanged:(UISlider *)slider {
-    switch (slider.tag) {
-        case 500: self.cfgOffsetX    = slider.value; break;
-        case 501: self.cfgOffsetY    = slider.value; break;
-        case 502: self.cfgZoom       = slider.value; break;
-        case 503: self.cfgBrightness = slider.value; break;
-        case 504: self.cfgSaturation = slider.value; break;
-    }
-    [self _saveConfig];
+- (void)_mirrorToggle:(UISwitch *)sw {
+    [self _saveEdit:^(NSMutableDictionary *s) { s[@"Mirror"] = @(sw.on); }];
 }
+
+- (void)_floatingToggle:(UISwitch *)sw {
+    [self _saveEdit:^(NSMutableDictionary *s) { s[@"Floating"] = @(sw.on); }];
+}
+
+#pragma mark - Import
 
 - (void)_showImportPicker {
     UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Import Media"
@@ -534,36 +467,14 @@ typedef NS_ENUM(NSInteger, VCFSourceMode) {
 
     [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel"
         style:UIAlertActionStyleCancel handler:nil]];
-
     [self presentViewController:sheet animated:YES completion:nil];
 }
-
-- (void)_clearStreamCache {
-    UIAlertController *alert = [UIAlertController
-        alertControllerWithTitle:@"Clear Streams?"
-        message:@"Delete all cached stream files."
-        preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel"
-        style:UIAlertActionStyleCancel handler:nil]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"Delete"
-        style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
-            NSArray *files = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:kStreamDir error:nil];
-            for (NSString *f in files) {
-                [[NSFileManager defaultManager] removeItemAtPath:
-                    [kStreamDir stringByAppendingPathComponent:f] error:nil];
-            }
-        }]];
-    [self presentViewController:alert animated:YES completion:nil];
-}
-
-#pragma mark - PHPickerViewControllerDelegate
 
 - (void)picker:(PHPickerViewController *)picker didFinishPicking:(NSArray<PHPickerResult *> *)results {
     [picker dismissViewControllerAnimated:YES completion:nil];
     if (results.count == 0) return;
 
-    PHPickerResult *result = results[0];
-    NSItemProvider *provider = result.itemProvider;
+    NSItemProvider *provider = results[0].itemProvider;
 
     if ([provider hasItemConformingToTypeIdentifier:@"public.movie"]) {
         [provider loadFileRepresentationForTypeIdentifier:@"public.movie"
@@ -572,9 +483,9 @@ typedef NS_ENUM(NSInteger, VCFSourceMode) {
                 dispatch_async(dispatch_get_main_queue(), ^{
                     VCFMediaItem *item = [[VCFMediaStore shared] importFileAtURL:url];
                     if (item) {
-                        self.selectedMedia = item.filename;
-                        self.sourceMode = VCFSourceModeVideo;
-                        [self _saveConfig];
+                        [self _saveEdit:^(NSMutableDictionary *s) {
+                            s[@"Media"] = item.filename; s[@"Kind"] = @"video";
+                        }];
                     }
                     [self.tableView reloadData];
                 });
@@ -587,9 +498,9 @@ typedef NS_ENUM(NSInteger, VCFSourceMode) {
                                   (long)[[NSDate date] timeIntervalSince1970]];
                 VCFMediaItem *item = [[VCFMediaStore shared] importImage:img withName:name];
                 if (item) {
-                    self.selectedMedia = item.filename;
-                    self.sourceMode = VCFSourceModeImage;
-                    [self _saveConfig];
+                    [self _saveEdit:^(NSMutableDictionary *s) {
+                        s[@"Media"] = item.filename; s[@"Kind"] = @"image";
+                    }];
                 }
                 [self.tableView reloadData];
             });
@@ -597,16 +508,12 @@ typedef NS_ENUM(NSInteger, VCFSourceMode) {
     }
 }
 
-#pragma mark - UIDocumentPickerDelegate
-
-- (void)documentPicker:(UIDocumentPickerViewController *)controller
-    didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
+- (void)documentPicker:(UIDocumentPickerViewController *)c didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     if (urls.count == 0) return;
     VCFMediaItem *item = [[VCFMediaStore shared] importFileAtURL:urls[0]];
     if (item) {
-        self.selectedMedia = item.filename;
-        self.sourceMode = (item.type == VCFMediaTypeVideo) ? VCFSourceModeVideo : VCFSourceModeImage;
-        [self _saveConfig];
+        NSString *kind = item.type == VCFMediaTypeVideo ? @"video" : @"image";
+        [self _saveEdit:^(NSMutableDictionary *s) { s[@"Media"] = item.filename; s[@"Kind"] = kind; }];
     }
     [self.tableView reloadData];
 }
@@ -615,15 +522,11 @@ typedef NS_ENUM(NSInteger, VCFSourceMode) {
 
 - (void)_registerNotifications {
     int token;
-    notify_register_dispatch(kNotifStatusChanged.UTF8String, &token,
+    notify_register_dispatch(VCFSettingsNotification.UTF8String, &token,
         dispatch_get_main_queue(), ^(int t) {
+            [self _loadSettings];
             [self _updateStatusBanner];
-        });
-    notify_register_dispatch(kNotifServerChanged.UTF8String, &token,
-        dispatch_get_main_queue(), ^(int t) {
-            [self _refreshServerStatus];
-            [self.tableView reloadSections:[NSIndexSet indexSetWithIndex:3]
-                          withRowAnimation:UITableViewRowAnimationNone];
+            [self.tableView reloadData];
         });
 }
 
@@ -631,12 +534,10 @@ typedef NS_ENUM(NSInteger, VCFSourceMode) {
 
 - (NSString *)_localIPAddress {
     struct ifaddrs *interfaces = NULL;
-    struct ifaddrs *temp = NULL;
     NSString *address = nil;
-
     if (getifaddrs(&interfaces) == 0) {
-        temp = interfaces;
-        while (temp != NULL) {
+        struct ifaddrs *temp = interfaces;
+        while (temp) {
             if (temp->ifa_addr && temp->ifa_addr->sa_family == AF_INET) {
                 NSString *ifname = [NSString stringWithUTF8String:temp->ifa_name];
                 if ([ifname isEqualToString:@"en0"]) {
@@ -650,6 +551,10 @@ typedef NS_ENUM(NSInteger, VCFSourceMode) {
     }
     freeifaddrs(interfaces);
     return address;
+}
+
+- (void)dealloc {
+    [self.displayLink invalidate];
 }
 
 @end
